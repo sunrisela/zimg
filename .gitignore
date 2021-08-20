@@ -23,6 +23,7 @@
 
 .gitignore
 tags
+.vscode
 
 *.swp
 *.pc

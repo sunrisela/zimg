@@ -39,6 +39,7 @@ typedef struct {
     int partno;
     int succno;
     int check_name;
+    char file_type[32];
 } mp_arg_t;
 
 int zimg_etag_set(evhtp_request_t *request, char *buff, size_t len);
@@ -424,6 +425,8 @@ int on_header_value(multipart_parser* p, const char *at, size_t length) {
                     if (is_img(fileType) != 1) {
                         LOG_PRINT(LOG_DEBUG, "fileType[%s] is Not Supported!", fileType);
                         mp_arg->check_name = -1;
+                    } else {
+                        str_lcpy(mp_arg->file_type, fileType, 32);
                     }
                 }
             }
@@ -466,11 +469,19 @@ int on_chunk_data(multipart_parser* p, const char *at, size_t length) {
     } else {
         mp_arg->succno++;
         LOG_PRINT(LOG_INFO, "%s succ post pic:%s size:%d", mp_arg->address, md5sum, length);
+
+        // calculate left 6 chars of md5 to 16 hex
+        char c[7];
+        str_lcpy(c, md5sum, 7);
+        int tag = strtol(c, NULL, 16);
+        // request host
+        const char *req_host = evhtp_header_find(mp_arg->req->headers_in, "Host");
+
         evbuffer_add_printf(mp_arg->req->buffer_out,
                             "<h1>MD5: %s</h1>\n"
                             "Image upload successfully! You can get this image via this address:<br/><br/>\n"
-                            "<a href=\"/%s\">http://yourhostname:%d/%s</a>?w=width&h=height&g=isgray&x=position_x&y=position_y&r=rotate&q=quality&f=format\n",
-                            md5sum, md5sum, settings.port, md5sum
+                            "<a href=\"/%d/%s.%s\" target=\"_blank\">http://%s/%d/%s.%s</a>\n",
+                            md5sum, tag, md5sum, mp_arg->file_type, req_host, tag, md5sum, mp_arg->file_type
                            );
     }
     return 0;
@@ -486,6 +497,16 @@ int json_return(evhtp_request_t *req, int err_no, const char *md5sum, int post_s
         cJSON_AddBoolToObject(j_ret, "ret", 1);
         cJSON_AddStringToObject(j_ret_info, "md5", md5sum);
         cJSON_AddNumberToObject(j_ret_info, "size", post_size);
+
+        // calculate left 6 chars of md5 to 16 hex
+        char c[7];
+        str_lcpy(c, md5sum, 7);
+        int tag = strtol(c, NULL, 16);
+        char img_url[128];
+        const char *content_type = evhtp_header_find(req->headers_in, "Content-Type");
+        snprintf(img_url, 128, "/%d/%s.%s", tag, md5sum, content_type);
+        cJSON_AddStringToObject(j_ret_info, "url", img_url);
+
         cJSON_AddItemToObject(j_ret, "info", j_ret_info);
     } else {
         cJSON_AddBoolToObject(j_ret, "ret", 0);
@@ -864,17 +885,36 @@ void get_request_cb(evhtp_request_t *req, void *arg) {
         goto forbidden;
     }
 
-    size_t md5_len = strlen(uri) + 1;
-    md5 = (char *)malloc(md5_len);
+    /** here is custom code. BEGIN **/
+    const char *diag = strrchr(uri, '/');
+    const char *filename = diag ? diag + 1 : uri;
+    const char *dot = strrchr(filename, '.');
+    size_t filename_len = strlen(filename);
+    size_t md5_len;
+    if (dot) {
+        md5_len = dot - filename + 1;
+    } else {
+        md5_len = filename_len + 1;
+    }
+    md5 = (char *) malloc(md5_len);
     if (md5 == NULL) {
         LOG_PRINT(LOG_DEBUG, "md5 malloc failed!");
         LOG_PRINT(LOG_ERROR, "%s fail malloc", address);
         goto err;
     }
-    if (uri[0] == '/')
-        str_lcpy(md5, uri + 1, md5_len);
-    else
-        str_lcpy(md5, uri, md5_len);
+    if (filename[0] == '/') {
+        str_lcpy(md5, filename + 1, md5_len);
+    } else {
+        str_lcpy(md5, filename, md5_len);
+    }
+    if (dot && dot != filename) {
+        size_t fmt_len = filename_len - md5_len + 1;
+        fmt = (char *) malloc(fmt_len);
+        str_lcpy(fmt, dot + 1, fmt_len);
+        LOG_PRINT(LOG_DEBUG, "fmt = %s", fmt);
+    }
+    /** here is custom code. END **/
+
     LOG_PRINT(LOG_DEBUG, "md5 of request is <%s>",  md5);
     if (is_md5(md5) == -1) {
         LOG_PRINT(LOG_DEBUG, "Url is Not a zimg Request.");
@@ -927,13 +967,15 @@ void get_request_cb(evhtp_request_t *req, void *arg) {
             const char *str_q = evhtp_kv_find(params, "q");
             quality = (str_q) ? atoi(str_q) : 0;
 
-            const char *str_f = evhtp_kv_find(params, "f");
-            if (str_f) {
-                size_t fmt_len = strlen(str_f) + 1;
-                fmt = (char *)malloc(fmt_len);
-                if (fmt != NULL)
-                    str_lcpy(fmt, str_f, fmt_len);
-                LOG_PRINT(LOG_DEBUG, "fmt = %s", fmt);
+            if (fmt == NULL) {
+                const char *str_f = evhtp_kv_find(params, "f");
+                if (str_f) {
+                    size_t fmt_len = strlen(str_f) + 1;
+                    fmt = (char *)malloc(fmt_len);
+                    if (fmt != NULL)
+                        str_lcpy(fmt, str_f, fmt_len);
+                    LOG_PRINT(LOG_DEBUG, "fmt = %s", fmt);
+                }
             }
         }
 
